@@ -20,7 +20,7 @@ import (
 
 const (
 	baseURL     = "https://testnet-rpc.fairblock.network"
-	workerCount = 1000
+	workerCount = 650
 	retries     = 5
 	barWidth    = 50
 
@@ -29,6 +29,9 @@ const (
 	colorGrey  = "\x1b[90m"
 	colorReset = "\x1b[0m"
 )
+
+// define your height cutoffs here (open-ended tail will be added automatically)
+var heightCuts = []int{668018, 920097, 1250464, 1501367}
 
 var spinnerFrames = []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
 
@@ -86,7 +89,7 @@ var client = &http.Client{
 	Timeout: 30 * time.Second,
 }
 
-// globals for user metrics
+// globals for user metrics (weekly)
 var (
 	allUsers          = make(map[string]struct{})
 	userFirstSeenWeek = make(map[string]int)
@@ -163,7 +166,41 @@ type WeekData struct {
 	WeeklyTotalTxs int
 }
 
-// getWithRetry retries GET up to retries times
+// DayData aggregates per-day
+type DayData struct {
+	Timestamps                     []time.Time
+	NewEncryptedTxSubmitted        int
+	RevertedEncryptedTx            int
+	NewGeneralEncryptedTxSubmitted int
+	KeyshareSent                   int
+	KeyshareAggregated             int
+	GeneralKeyshareAggregated      int
+	ValidatorVotes                 map[string]int
+
+	ActiveUsers    map[string]struct{}
+	NewUsers       map[string]struct{}
+	TxCountPerUser map[string]int
+	DailyTotalTxs  int
+}
+
+// RangeData aggregates per height-range
+type RangeData struct {
+	StartHeight, EndHeight         int
+	Timestamps                     []time.Time
+	NewEncryptedTxSubmitted        int
+	RevertedEncryptedTx            int
+	NewGeneralEncryptedTxSubmitted int
+	KeyshareSent                   int
+	KeyshareAggregated             int
+	GeneralKeyshareAggregated      int
+	ValidatorVotes                 map[string]int
+
+	ActiveUsers    map[string]struct{}
+	NewUsers       map[string]struct{}
+	TxCountPerUser map[string]int
+	BucketTotalTxs int
+}
+
 func getWithRetry(url string) ([]byte, error) {
 	var lastErr error
 	for i := 1; i <= retries; i++ {
@@ -310,6 +347,42 @@ func printProgress(done, total int, elapsed time.Duration, spinner string) {
 	}
 }
 
+type heightRange struct {
+	Start int
+	End   int
+}
+
+func buildRanges(cuts []int, maxHeight int) []heightRange {
+	out := []heightRange{}
+	if len(cuts) == 0 {
+		out = append(out, heightRange{Start: 1, End: maxHeight})
+		return out
+	}
+	cp := append([]int(nil), cuts...)
+	sort.Ints(cp)
+	start := 1
+	for _, c := range cp {
+		if c >= start {
+			out = append(out, heightRange{Start: start, End: c})
+			start = c + 1
+		}
+	}
+	if start <= maxHeight {
+		out = append(out, heightRange{Start: start, End: maxHeight})
+	}
+	return out
+}
+
+func findRangeIndex(ranges []heightRange, h int) int {
+	// linear is fine given tiny range counts; could binary search if needed
+	for i, r := range ranges {
+		if h >= r.Start && h <= r.End {
+			return i
+		}
+	}
+	return -1
+}
+
 func main() {
 	fmt.Println("Starting → resolving RPC endpoint & fetching chain height…")
 
@@ -342,7 +415,7 @@ func main() {
 					resultsCh <- res
 					atomic.AddInt32(&processed, 1)
 				} else {
-					atomic.AddInt32(&skipped, 1) // << bump skip count
+					atomic.AddInt32(&skipped, 1)
 				}
 			}
 		}()
@@ -376,9 +449,18 @@ func main() {
 		}
 	}()
 
-	// aggregate
+	// aggregators
 	weeklyData := make(map[int]*WeekData)
+	dailyData := make(map[string]*DayData) // key = YYYY-MM-DD (UTC)
+	rangeData := make(map[int]*RangeData)  // key = range index
+	userFirstSeenDay := make(map[string]string)
+	userFirstSeenRange := make(map[string]int)
+
+	ranges := buildRanges(heightCuts, height)
+
+	// collect & aggregate
 	for res := range resultsCh {
+		// week index
 		wi := int(res.Timestamp.Sub(genesisTime).Seconds() / (7 * 24 * 3600))
 		wd, ok := weeklyData[wi]
 		if !ok {
@@ -390,6 +472,42 @@ func main() {
 			}
 			weeklyData[wi] = wd
 		}
+
+		// day key (UTC)
+		dayStart := time.Date(res.Timestamp.UTC().Year(), res.Timestamp.UTC().Month(), res.Timestamp.UTC().Day(), 0, 0, 0, 0, time.UTC)
+		dayKey := dayStart.Format("2006-01-02")
+		dd, ok := dailyData[dayKey]
+		if !ok {
+			dd = &DayData{
+				ValidatorVotes: make(map[string]int),
+				ActiveUsers:    make(map[string]struct{}),
+				NewUsers:       make(map[string]struct{}),
+				TxCountPerUser: make(map[string]int),
+			}
+			dailyData[dayKey] = dd
+		}
+
+		// height range idx
+		ri := findRangeIndex(ranges, res.Height)
+		if ri == -1 {
+			// should not happen; skip safe-guard
+			continue
+		}
+		rd, ok := rangeData[ri]
+		if !ok {
+			rd = &RangeData{
+				StartHeight:    ranges[ri].Start,
+				EndHeight:      ranges[ri].End,
+				ValidatorVotes: make(map[string]int),
+				ActiveUsers:    make(map[string]struct{}),
+				NewUsers:       make(map[string]struct{}),
+				TxCountPerUser: make(map[string]int),
+			}
+			rangeData[ri] = rd
+		}
+
+		// === common adds ===
+		// weekly
 		wd.Timestamps = append(wd.Timestamps, res.Timestamp)
 		wd.NewEncryptedTxSubmitted += res.NewEncryptedTxSubmitted
 		wd.RevertedEncryptedTx += res.RevertedEncryptedTx
@@ -401,8 +519,36 @@ func main() {
 			wd.ValidatorVotes[v] += c
 		}
 		wd.WeeklyTotalTxs += res.TotalTxs
-		// cumulativeTotalTxs += res.TotalTxs
+
+		// daily
+		dd.Timestamps = append(dd.Timestamps, res.Timestamp)
+		dd.NewEncryptedTxSubmitted += res.NewEncryptedTxSubmitted
+		dd.RevertedEncryptedTx += res.RevertedEncryptedTx
+		dd.NewGeneralEncryptedTxSubmitted += res.NewGeneralEncryptedTxSubmitted
+		dd.KeyshareSent += res.KeyshareSent
+		dd.KeyshareAggregated += res.KeyshareAggregated
+		dd.GeneralKeyshareAggregated += res.GeneralKeyshareAggregated
+		for v, c := range res.ValidatorVotes {
+			dd.ValidatorVotes[v] += c
+		}
+		dd.DailyTotalTxs += res.TotalTxs
+
+		// range
+		rd.Timestamps = append(rd.Timestamps, res.Timestamp)
+		rd.NewEncryptedTxSubmitted += res.NewEncryptedTxSubmitted
+		rd.RevertedEncryptedTx += res.RevertedEncryptedTx
+		rd.NewGeneralEncryptedTxSubmitted += res.NewGeneralEncryptedTxSubmitted
+		rd.KeyshareSent += res.KeyshareSent
+		rd.KeyshareAggregated += res.KeyshareAggregated
+		rd.GeneralKeyshareAggregated += res.GeneralKeyshareAggregated
+		for v, c := range res.ValidatorVotes {
+			rd.ValidatorVotes[v] += c
+		}
+		rd.BucketTotalTxs += res.TotalTxs
+
+		// users/senders
 		for user, c := range res.TxCountPerSender {
+			// weekly "new" is first time ever seen (uses allUsers)
 			if _, seen := allUsers[user]; !seen {
 				allUsers[user] = struct{}{}
 				userFirstSeenWeek[user] = wi
@@ -410,6 +556,22 @@ func main() {
 			}
 			wd.ActiveUsers[user] = struct{}{}
 			wd.TxCountPerUser[user] += c
+
+			// daily "new": first time ever seen dayKey
+			if _, ok := userFirstSeenDay[user]; !ok {
+				userFirstSeenDay[user] = dayKey
+				dd.NewUsers[user] = struct{}{}
+			}
+			dd.ActiveUsers[user] = struct{}{}
+			dd.TxCountPerUser[user] += c
+
+			// range "new": first time ever seen in any range
+			if _, ok := userFirstSeenRange[user]; !ok {
+				userFirstSeenRange[user] = ri
+				rd.NewUsers[user] = struct{}{}
+			}
+			rd.ActiveUsers[user] = struct{}{}
+			rd.TxCountPerUser[user] += c
 		}
 	}
 
@@ -418,7 +580,20 @@ func main() {
 	printProgress(int(atomic.LoadInt32(&processed)), height, time.Since(start), " ")
 	fmt.Println()
 
-	// —— weekly_stats.csv ——
+	// ---------- CSV: weekly_stats.csv (unchanged schema) ----------
+	writeWeeklyCSV(weeklyData, genesisTime)
+
+	// ---------- CSV: daily_stats.csv ----------
+	writeDailyCSV(dailyData)
+
+	// ---------- CSV: height_buckets.csv ----------
+	writeRangeCSV(rangeData)
+
+	fmt.Printf("Done in %s\n", time.Since(start))
+	fmt.Printf("Skipped %d blocks\n", atomic.LoadInt32(&skipped))
+}
+
+func writeWeeklyCSV(weeklyData map[int]*WeekData, genesisTime time.Time) {
 	statsF, err := os.Create("weekly_stats.csv")
 	if err != nil {
 		log.Fatalf("couldn't create weekly_stats.csv: %v", err)
@@ -449,9 +624,7 @@ func main() {
 
 	for _, wi := range weeks {
 		wd := weeklyData[wi]
-		sort.Slice(wd.Timestamps, func(i, j int) bool {
-			return wd.Timestamps[i].Before(wd.Timestamps[j])
-		})
+		sort.Slice(wd.Timestamps, func(i, j int) bool { return wd.Timestamps[i].Before(wd.Timestamps[j]) })
 		var avg float64
 		if len(wd.Timestamps) > 1 {
 			var sum float64
@@ -467,17 +640,7 @@ func main() {
 		cumUsers += newU
 		cumTxs += wd.WeeklyTotalTxs
 
-		u1, u2_5, u5p := 0, 0, 0
-		for _, cnt := range wd.TxCountPerUser {
-			switch {
-			case cnt == 1:
-				u1++
-			case cnt >= 2 && cnt <= 5:
-				u2_5++
-			case cnt > 5:
-				u5p++
-			}
-		}
+		u1, u2_5, u5p := bucketizeUserCounts(wd.TxCountPerUser)
 
 		row := []string{
 			weekStart,
@@ -502,46 +665,182 @@ func main() {
 		}
 	}
 	fmt.Println("Weekly stats written to weekly_stats.csv")
+}
 
-	// —— validator_votes.csv ——
-	allVals := make(map[string]struct{})
-	for _, wd := range weeklyData {
-		for v := range wd.ValidatorVotes {
-			allVals[v] = struct{}{}
-		}
-	}
-	vals := make([]string, 0, len(allVals))
-	for v := range allVals {
-		vals = append(vals, v)
-	}
-	sort.Strings(vals)
-
-	vF, err := os.Create("validator_votes.csv")
+func writeDailyCSV(dailyData map[string]*DayData) {
+	f, err := os.Create("daily_stats.csv")
 	if err != nil {
-		log.Fatalf("couldn't create validator_votes.csv: %v", err)
+		log.Fatalf("couldn't create daily_stats.csv: %v", err)
 	}
-	defer vF.Close()
-	vw := csv.NewWriter(vF)
-	defer vw.Flush()
+	defer f.Close()
+	w := csv.NewWriter(f)
+	defer w.Flush()
 
-	vHeader := append([]string{"week_start"}, vals...)
-	if err := vw.Write(vHeader); err != nil {
-		log.Fatalf("error writing votes header: %v", err)
+	header := []string{
+		"day_start", "avg_block_time",
+		"successful_encrypted_txs", "reverted_encrypted_txs",
+		"successful_general_encrypted_tx", "successful_keyshares",
+		"decryption_keys", "general_decryption_keys",
+		"total_users", "active_users", "new_users",
+		"users_1_tx", "users_2_5_tx", "users_5plus_tx",
+		"daily_txs", "cumulative_txs",
+	}
+	if err := w.Write(header); err != nil {
+		log.Fatalf("error writing header: %v", err)
 	}
 
-	for _, wi := range weeks {
-		wd := weeklyData[wi]
-		weekStart := genesisTime.Add(time.Duration(wi) * 7 * 24 * time.Hour).Format(time.RFC3339)
-		row := []string{weekStart}
-		for _, v := range vals {
-			row = append(row, strconv.Itoa(wd.ValidatorVotes[v]))
+	// sort days ascending
+	days := make([]string, 0, len(dailyData))
+	for k := range dailyData {
+		days = append(days, k)
+	}
+	sort.Strings(days)
+
+	var cumUsers, cumTxs int
+	totalUsersSeen := make(map[string]struct{})
+	for _, dayKey := range days {
+		dd := dailyData[dayKey]
+		sort.Slice(dd.Timestamps, func(i, j int) bool { return dd.Timestamps[i].Before(dd.Timestamps[j]) })
+
+		var avg float64
+		if len(dd.Timestamps) > 1 {
+			var sum float64
+			for i := 1; i < len(dd.Timestamps); i++ {
+				sum += dd.Timestamps[i].Sub(dd.Timestamps[i-1]).Seconds()
+			}
+			avg = sum / float64(len(dd.Timestamps)-1)
 		}
-		if err := vw.Write(row); err != nil {
-			log.Fatalf("error writing votes row for week %d: %v", wi, err)
+
+		newU := len(dd.NewUsers)
+		activeU := len(dd.ActiveUsers)
+		// cumulative unique users across days
+		for u := range dd.NewUsers {
+			totalUsersSeen[u] = struct{}{}
+		}
+		cumUsers = len(totalUsersSeen)
+		cumTxs += dd.DailyTotalTxs
+
+		u1, u2_5, u5p := bucketizeUserCounts(dd.TxCountPerUser)
+
+		row := []string{
+			dayKey + "T00:00:00Z", // normalized UTC day-start
+			fmt.Sprintf("%.2f", avg),
+			strconv.Itoa(dd.NewEncryptedTxSubmitted),
+			strconv.Itoa(dd.RevertedEncryptedTx),
+			strconv.Itoa(dd.NewGeneralEncryptedTxSubmitted),
+			strconv.Itoa(dd.KeyshareSent),
+			strconv.Itoa(dd.KeyshareAggregated),
+			strconv.Itoa(dd.GeneralKeyshareAggregated),
+			strconv.Itoa(cumUsers),
+			strconv.Itoa(activeU),
+			strconv.Itoa(newU),
+			strconv.Itoa(u1),
+			strconv.Itoa(u2_5),
+			strconv.Itoa(u5p),
+			strconv.Itoa(dd.DailyTotalTxs),
+			strconv.Itoa(cumTxs),
+		}
+		if err := w.Write(row); err != nil {
+			log.Fatalf("error writing row for day %s: %v", dayKey, err)
 		}
 	}
-	fmt.Println("Validator votes written to validator_votes.csv")
+	fmt.Println("Daily stats written to daily_stats.csv")
+}
 
-	fmt.Printf("Done in %s\n", time.Since(start))
-	fmt.Printf("Skipped %d blocks\n", atomic.LoadInt32(&skipped))
+func writeRangeCSV(rangeData map[int]*RangeData) {
+	f, err := os.Create("height_buckets.csv")
+	if err != nil {
+		log.Fatalf("couldn't create height_buckets.csv: %v", err)
+	}
+	defer f.Close()
+	w := csv.NewWriter(f)
+	defer w.Flush()
+
+	header := []string{
+		"range_label", "avg_block_time",
+		"successful_encrypted_txs", "reverted_encrypted_txs",
+		"successful_general_encrypted_tx", "successful_keyshares",
+		"decryption_keys", "general_decryption_keys",
+		"total_users", "active_users", "new_users",
+		"users_1_tx", "users_2_5_tx", "users_5plus_tx",
+		"bucket_txs", "cumulative_txs",
+	}
+	if err := w.Write(header); err != nil {
+		log.Fatalf("error writing header: %v", err)
+	}
+
+	// sort by range index
+	ids := make([]int, 0, len(rangeData))
+	for i := range rangeData {
+		ids = append(ids, i)
+	}
+	sort.Ints(ids)
+
+	var cumUsers, cumTxs int
+	totalUsersSeen := make(map[string]struct{})
+	for _, i := range ids {
+		rd := rangeData[i]
+		sort.Slice(rd.Timestamps, func(a, b int) bool { return rd.Timestamps[a].Before(rd.Timestamps[b]) })
+
+		var avg float64
+		if len(rd.Timestamps) > 1 {
+			var sum float64
+			for j := 1; j < len(rd.Timestamps); j++ {
+				sum += rd.Timestamps[j].Sub(rd.Timestamps[j-1]).Seconds()
+			}
+			avg = sum / float64(len(rd.Timestamps)-1)
+		}
+
+		newU := len(rd.NewUsers)
+		activeU := len(rd.ActiveUsers)
+		for u := range rd.NewUsers {
+			totalUsersSeen[u] = struct{}{}
+		}
+		cumUsers = len(totalUsersSeen)
+		cumTxs += rd.bucketTxs()
+
+		u1, u2_5, u5p := bucketizeUserCounts(rd.TxCountPerUser)
+
+		label := fmt.Sprintf("%d-%d", rd.StartHeight, rd.EndHeight)
+		row := []string{
+			label,
+			fmt.Sprintf("%.2f", avg),
+			strconv.Itoa(rd.NewEncryptedTxSubmitted),
+			strconv.Itoa(rd.RevertedEncryptedTx),
+			strconv.Itoa(rd.NewGeneralEncryptedTxSubmitted),
+			strconv.Itoa(rd.KeyshareSent),
+			strconv.Itoa(rd.KeyshareAggregated),
+			strconv.Itoa(rd.GeneralKeyshareAggregated),
+			strconv.Itoa(cumUsers),
+			strconv.Itoa(activeU),
+			strconv.Itoa(newU),
+			strconv.Itoa(u1),
+			strconv.Itoa(u2_5),
+			strconv.Itoa(u5p),
+			strconv.Itoa(rd.bucketTxs()),
+			strconv.Itoa(cumTxs),
+		}
+		if err := w.Write(row); err != nil {
+			log.Fatalf("error writing height range row %s: %v", label, err)
+		}
+	}
+	fmt.Println("Height-bucket stats written to height_buckets.csv")
+}
+
+func (rd *RangeData) bucketTxs() int {
+	return rd.BucketTotalTxs
+}
+
+func bucketizeUserCounts(m map[string]int) (u1, u2_5, u5p int) {
+	for _, cnt := range m {
+		switch {
+		case cnt == 1:
+			u1++
+		case cnt >= 2 && cnt <= 5:
+			u2_5++
+		case cnt > 5:
+			u5p++
+		}
+	}
+	return
 }
