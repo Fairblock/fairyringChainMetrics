@@ -31,10 +31,9 @@ const (
 	accountPrefix = "pepacc" // created accounts: pepacc0001..pepacc1000
 
 	// scale
-	numAccounts      = 1000
-	signedTxsPerAcct = 10                // 1+2+3+4=10 per account across the 4 rounds
-	fundInitialEach  = int64(50_000_000) // initial seeding per account
-	fundRoundEach    = int64(5_000_000_000)
+	numAccounts     = 1000
+	fundInitialEach = int64(50_000_000) // initial seeding per account
+	fundRoundEach   = int64(5_000_000_000)
 
 	// gas for plaintext (offline signed bank-send used only for encryption step)
 	gasOfflineSend = int64(120_000)
@@ -43,7 +42,7 @@ const (
 	pepRetryBumpFactor = 1.30             // if OOG, retry with used*1.30
 	pepRetryGasFloor   = int64(100000000) // minimum fixed gas on retry
 
-	// ── NEW: multi-msg funding gas heuristics + batching size
+	// ── multi-msg funding gas heuristics + batching size
 	baseGasFunding   = int64(300_000)
 	gasPerMsgFunding = int64(90_000)
 	fundBatchSize    = 200 // msgs per funding tx (adjust as needed)
@@ -53,19 +52,17 @@ const (
 	txInclusionTimeout = 180 * time.Second
 
 	// dirs
-	outRoot    = "./pep_out"
-	signedRoot = "./pep_out/signed" // per-account subdirs
-	logEveryN  = 50
-
-	// target block offsets per round
-	offsetRound1 = int64(100)
-	offsetRound2 = int64(200)
-	offsetRound3 = int64(300)
-	offsetRound4 = int64(400)
-
-	// concurrency for account workers (encryption/submission). Funding batches run sequentially.
-	parAccounts = 100
+	outRoot          = "./pep_out"
+	signedRoot       = "./pep_out/signed" // per-account subdirs
+	metricsCSVPath   = outRoot + "/round_metrics.csv"
+	logEveryN        = 50
+	parAccounts      = 100
+	maxRounds        = 10         // set to any N ≥ 1
+	targetOffsetStep = int64(100) // round r → target = currentHeight + r*targetOffsetStep
 )
+
+// Derive how many offline txs each account must pre-sign (1+2+…+maxRounds)
+var signedTxsPerAcct = maxRounds * (maxRounds + 1) / 2
 
 // computed flags
 var (
@@ -417,7 +414,7 @@ func fundAccountsOnlineBatched(ctx context.Context, funderName, funderAddr strin
 				return "", err
 			}
 			_ = os.Remove(unsigned)
-			txh, err := broadcastFileAndWait(ctx, signed)
+			txh, err := tryBroadcastFunding(ctx, signed)
 			_ = os.Remove(signed)
 			return txh, err
 		}
@@ -436,6 +433,10 @@ func fundAccountsOnlineBatched(ctx context.Context, funderName, funderAddr strin
 		}
 	}
 	return nil
+}
+
+func tryBroadcastFunding(ctx context.Context, signedPath string) (string, error) {
+	return broadcastFileAndWait(ctx, signedPath)
 }
 
 // ───────────────────────── inclusion wait ─────────────────────────
@@ -654,6 +655,40 @@ func pepSubmitEncryptedTx(ctx context.Context, fromName, data string, target int
 	return txh, nil
 }
 
+// ───────────────────────── CSV helpers ─────────────────────────
+
+func ensureCSVHeader(path string) error {
+	// create dir
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	// if file exists and non-empty, do nothing
+	if st, err := os.Stat(path); err == nil && st.Size() > 0 {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = fmt.Fprintln(f, "round,txs_per_account,num_accounts,total_txs,target_height,target_block_time_s,target_delta_s,processed_height,processed_block_time_s,processed_delta_s,avg_block_time_s")
+	return err
+}
+
+func appendRoundCSV(path string, round, txPerAcc, numAcc int, totalTxs int64, targetH int64, bt, btDelta float64, processedH int64, btn, btnDelta float64, baseline float64) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = fmt.Fprintf(
+		f,
+		"%d,%d,%d,%d,%d,%.3f,%.3f,%d,%.3f,%.3f,%.3f\n",
+		round, txPerAcc, numAcc, totalTxs, targetH, bt, btDelta, processedH, btn, btnDelta, baseline,
+	)
+	return err
+}
+
 // ───────────────────────── utils ─────────────────────────
 
 func mustMkdirAll(p string) {
@@ -700,6 +735,9 @@ func IBEBenchmark() {
 	ctx := context.Background()
 	mustMkdirAll(outRoot)
 	mustMkdirAll(signedRoot)
+	if err := ensureCSVHeader(metricsCSVPath); err != nil {
+		panic(err)
+	}
 
 	// 1) baseline avg block time
 	fmt.Println("measuring baseline over 10 blocks…")
@@ -779,7 +817,7 @@ func IBEBenchmark() {
 		pepNonce[i] = 1
 	}
 
-	// 5) for each account, offline sign 10 bank send txs using pep_nonce for sequence
+	// 5) for each account, offline sign Σ(1..maxRounds) bank send txs using pep_nonce for sequence
 	fmt.Printf("offline signing %d txs per account (pep_nonce as sequence)…\n", signedTxsPerAcct)
 	mustMkdirAll(signedRoot)
 	signErrs := make(chan error, numAccounts)
@@ -839,15 +877,17 @@ func IBEBenchmark() {
 	}
 	fmt.Printf("pep active pubkey: %s\n", pubkey)
 
-	// ROUNDS: 1, 2, 3, 4 txs per account, with target offsets 100/200/300/400
-	rounds := []struct {
+	// Build rounds dynamically
+	type roundCfg struct {
 		rnum   int
 		offset int64
-	}{
-		{1, offsetRound1},
-		{2, offsetRound2},
-		{3, offsetRound3},
-		{4, offsetRound4},
+	}
+	rounds := make([]roundCfg, 0, maxRounds)
+	for r := 1; r <= maxRounds; r++ {
+		rounds = append(rounds, roundCfg{
+			rnum:   r,
+			offset: int64(r) * targetOffsetStep,
+		})
 	}
 
 	for _, r := range rounds {
@@ -985,6 +1025,7 @@ func IBEBenchmark() {
 			panic(err)
 		}
 
+		// (Optional) Also measure +2 as before — not persisted to CSV
 		fmt.Printf("[round %d] waiting for height %d…\n", r.rnum, targetH+2)
 		if _, err := waitUntilHeight(ctx, targetH+2); err != nil {
 			panic(err)
@@ -1002,6 +1043,26 @@ func IBEBenchmark() {
 
 		fmt.Printf("[round %d] processed block %d time: %.3fs (baseline %.3fs, Δ=%.3fs)\n",
 			r.rnum, targetH+2, btn2, baseline, btn2-baseline)
+
+		// ── persist a CSV row immediately for this round ──
+		totalTxs := int64(numAccounts) * int64(r.rnum)
+		if err := appendRoundCSV(
+			metricsCSVPath,
+			r.rnum,
+			r.rnum,
+			numAccounts,
+			totalTxs,
+			targetH,
+			bt,
+			bt-baseline,
+			targetH+1,
+			btn,
+			btn-baseline,
+			baseline,
+		); err != nil {
+			// Don't kill the run if CSV append fails; just log it.
+			fmt.Println("WARN: failed writing CSV metrics:", err)
+		}
 	}
 
 	// Optional: cleanup any leftover signed files
