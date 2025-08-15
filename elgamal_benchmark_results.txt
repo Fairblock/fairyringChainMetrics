@@ -1,0 +1,20 @@
+Contracts not found, deploying...
+Deploying contracts...
+CW20 address: fairy17p9rzwnnfxcjp32un9ug7yhhzgtkhvl9jfksztgw5uh69wac2pgsl7lw4w
+ElGamal address: fairy1ghd753shjuwexxywmgs4xz7x2q732vcnkm6h2pyv9s6ah3hylvrqrgjh40
+Setting up accounts...
+Setup 6 accounts
+10 transfers per tx (total: 50) -> TPS=49.59, Block time=1.008s, Single block=YES
+100 transfers per tx (total: 500) -> TPS=496.32, Block time=1.007s, Single block=YES
+500 transfers per tx (total: 2,500) -> TPS=2481.66, Block time=1.007s, Single block=YES
+1,205 transfers per tx (total: 6,025) -> TPS=5944.27, Block time=1.014s, Single block=YES
+
+================================================================================
+FINAL RESULTS
+================================================================================
+Transfers | TPS      | Block Time | Success % | Gas/Tx    | Single Block | Height
+--------- | -------- | ---------- | --------- | --------- | ------------ | ------
+      50 |   49.59 |      1.008s |      100% |   143158 | YES          | 95
+     500 |  496.32 |      1.007s |      100% |   138731 | YES          | 101
+   2,500 | 2481.66 |      1.007s |      100% |   138411 | YES          | 108
+   6,025 | 5944.27 |      1.014s |      100% |   138417 | YES          | 117
