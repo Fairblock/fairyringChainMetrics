@@ -28,11 +28,12 @@ FUNDER_NAME    = "wallet1"
 
 SEND_AMOUNT_PER_MSG = 1
 BASELINE_BLOCKS     = 10
-CSV_PATH            = "msgsend_blocktime_results.csv"
+CSV_PATH            = "msgsend_blocktime_results_step.csv"
 
-# Exponential growth: 1,2,4,...
-GROWTH_BASE    = 2
-START_EXPONENT = 0
+# ── LINEAR growth: 1, 1000, 2000, 3000, ...
+LINEAR_FIRST_SPECIAL = 1
+LINEAR_START         = 200
+LINEAR_STEP          = 200
 
 # Gas heuristic for benchmark tx
 BASE_GAS    = 120_000
@@ -61,7 +62,6 @@ def run(cmd: str) -> str:
     return subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT).decode()
 
 def run_rc(cmd: str):
-    """Run and return (rc, stdout, stderr) without raising."""
     p = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return p.returncode, p.stdout.decode(errors="ignore"), p.stderr.decode(errors="ignore")
 
@@ -283,14 +283,12 @@ def build_unsigned_tx(messages: list[dict], gas_limit: int, fee_amount: int, mem
 
 # ────────────────────── Encode / size helpers ──────────────────────
 def encoded_tx_bytes_len(signed_path: str) -> int:
-    # 'tx encode' prints base64-encoded bytes (stdout). Use rc path to avoid raising.
     rc, out, err = run_rc(f"{FAIRYRINGD} tx encode {signed_path}")
     if rc != 0:
-        # try JSON output variant; otherwise just report error
         rc2, out2, err2 = run_rc(f"{FAIRYRINGD} tx encode {signed_path} --output json")
         combined = out + "\n" + err + "\n" + out2 + "\n" + err2
         raise RuntimeError(f"[encode] failed to encode tx for size check (rc={rc}):\n{combined.strip()}")
-    b64 = out.strip().strip('"')  # sometimes quoted when piping through json
+    b64 = out.strip().strip('"')
     try:
         raw = base64.b64decode(b64, validate=True)
         return len(raw)
@@ -316,8 +314,6 @@ def sign_tx_online(unsigned_path: str, signed_path: str, signer_name: str):
     print(f"[sign] wrote signed_file={signed_path} fs_size={size_fs}B encoded_size={enc_len if enc_len>=0 else 'unknown'}B")
 
 def broadcast_tx_verbose(signed_path: str) -> dict:
-    """Broadcast with rich logging and graceful fallback on non-JSON errors."""
-    # pre-measure encoded size and stop if obviously above mempool limit
     try:
         enc_len = encoded_tx_bytes_len(signed_path)
         if enc_len > MEMPOOL_MAX_TX_BYTES:
@@ -340,21 +336,14 @@ def broadcast_tx_verbose(signed_path: str) -> dict:
             return json.loads(out)
         except Exception:
             pass
-    # Non-zero rc OR unparsable JSON — show outputs and still try to recover if JSON exists inside
     print(f"[broadcast] ERROR rc={rc}\nstdout (first 2000 chars):\n{out[:2000]}\n---\nstderr:\n{err}", file=sys.stderr)
-    # attempt to extract JSON object if present
     first = out.find("{"); last = out.rfind("}")
     if first != -1 and last != -1 and last > first:
         try:
             return json.loads(out[first:last+1])
         except Exception:
             pass
-    return {
-        "code": 98,
-        "raw_log": f"broadcast failed rc={rc}; stdout/stderr attached above",
-        "txhash": None,
-        "height": 0,
-    }
+    return {"code": 98, "raw_log": f"broadcast failed rc={rc}; stdout/stderr attached above", "txhash": None, "height": 0}
 
 def est_fee_amount(gas_limit: int) -> int:
     gp = float(GAS_PRICE)
@@ -395,6 +384,15 @@ def handle_sigint(sig, frame):
 
 signal.signal(signal.SIGINT, handle_sigint)
 
+# ───────────────────────── linear message stream ─────────────────────────
+def linear_msg_counts():
+    """Yield 1, then 1000, 2000, 3000, ... forever."""
+    yield LINEAR_FIRST_SPECIAL
+    n = LINEAR_START
+    while True:
+        yield n
+        n += LINEAR_STEP
+
 # ─────────────────────────────── Main logic ───────────────────────────────
 def main():
     # Ensure keys
@@ -431,23 +429,25 @@ def main():
     baseline_avg = sum(times) / len(times)
     print(f"Baseline average block time: {baseline_avg:.3f}s")
 
-    # Benchmark loop
-    exp_idx = START_EXPONENT
+    # Benchmark loop (linear n_msgs)
+    step_idx = 0
     last_seen_height, _ = latest_height_and_time()
 
-    while not INTERRUPTED:
-        n_msgs = max(1, int(GROWTH_BASE ** exp_idx))
+    for n_msgs in linear_msg_counts():
+        if INTERRUPTED:
+            break
+
         msgs = build_msgs_sends(n_msgs, sender_addr, recip_addr, DENOM, SEND_AMOUNT_PER_MSG)
 
         gas_limit  = BASE_GAS + GAS_PER_MSG * n_msgs
         fee_amount = est_fee_amount(gas_limit)
         total_send = n_msgs * SEND_AMOUNT_PER_MSG
 
-        print(f"[prep] exp={exp_idx} n_msgs={n_msgs} gas_limit={gas_limit} fee={fee_amount}")
+        print(f"[prep] step={step_idx} n_msgs={n_msgs} gas_limit={gas_limit} fee={fee_amount}")
 
         ensure_sender_funded(FUNDER_NAME, sender_addr, min_needed=total_send + fee_amount + 5_000_000)
 
-        unsigned = build_unsigned_tx(messages=msgs, gas_limit=gas_limit, fee_amount=fee_amount, memo=f"bench exp={exp_idx} n={n_msgs}")
+        unsigned = build_unsigned_tx(messages=msgs, gas_limit=gas_limit, fee_amount=fee_amount, memo=f"bench step={step_idx} n={n_msgs}")
         unsigned_path = f"/tmp/unsigned_{int(time.time()*1000)}.json"
         signed_path   = f"/tmp/signed_{int(time.time()*1000)}.json"
         with open(unsigned_path, "w") as f:
@@ -471,7 +471,7 @@ def main():
             except Exception as e:
                 print(f"[guard] WARN: could not pre-check tx size: {e}", file=sys.stderr)
 
-            print(f"[exp={exp_idx} n={n_msgs}] broadcasting…")
+            print(f"[step={step_idx} n={n_msgs}] broadcasting…")
             broadcast = broadcast_tx_verbose(signed_path)
         finally:
             try: os.remove(unsigned_path)
@@ -480,10 +480,10 @@ def main():
         code  = int(broadcast.get("code", 0))
         txhash = broadcast.get("txhash") or broadcast.get("txHash") or ""
         if code != 0 or not txhash:
-            print(f"[exp={exp_idx} n={n_msgs}] BROADCAST FAIL code={code} txhash={txhash} raw_log={broadcast.get('raw_log')}")
+            print(f"[step={step_idx} n={n_msgs}] BROADCAST FAIL code={code} txhash={txhash} raw_log={broadcast.get('raw_log')}")
             break
 
-        print(f"[exp={exp_idx} n={n_msgs}] broadcast hash={txhash} — waiting inclusion…")
+        print(f"[step={step_idx} n={n_msgs}] broadcast hash={txhash} — waiting inclusion…")
         included = wait_for_inclusion(txhash, TX_INCLUSION_TIMEOUT_SEC)
         try: os.remove(signed_path)
         except Exception: pass
@@ -495,7 +495,7 @@ def main():
         ts         = included.get("timestamp", "")
 
         if inc_code != 0:
-            print(f"[exp={exp_idx} n={n_msgs}] Included with failure code={inc_code} at height={inc_height}. raw_log={included.get('raw_log')}")
+            print(f"[step={step_idx} n={n_msgs}] Included with failure code={inc_code} at height={inc_height}. raw_log={included.get('raw_log')}")
             break
 
         blk_time = block_time_for_height(inc_height)
@@ -505,9 +505,8 @@ def main():
         pr_blk_time = block_time_for_height(inc_height + 1)
         pr_delta    = pr_blk_time - baseline_avg
 
-
         row = {
-            "exp_index": exp_idx,
+            "exp_index": step_idx,
             "n_msgs": n_msgs,
             "txhash": txhash,
             "height": inc_height,
@@ -525,9 +524,9 @@ def main():
         }
         RESULTS.append(row)
 
-        print(f"[exp={exp_idx} n={n_msgs}] height={inc_height} gas_used={gas_used} block_time={blk_time:.3f}s (Δ={delta:+.3f}s)")
+        print(f"[step={step_idx} n={n_msgs}] height={inc_height} gas_used={gas_used} block_time={blk_time:.3f}s (Δ={delta:+.3f}s)")
 
-        exp_idx += 1
+        step_idx += 1
 
     write_results_to_csv(CSV_PATH)
     print(f"\nWrote results → {CSV_PATH}")

@@ -657,6 +657,7 @@ func pepSubmitEncryptedTx(ctx context.Context, fromName, data string, target int
 
 // ───────────────────────── CSV helpers ─────────────────────────
 
+// UPDATED: header now includes processed_h1 (h+1), processed_h2 (h+2), processed_h3 (h+3)
 func ensureCSVHeader(path string) error {
 	// create dir
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -671,11 +672,30 @@ func ensureCSVHeader(path string) error {
 		return err
 	}
 	defer f.Close()
-	_, err = fmt.Fprintln(f, "round,txs_per_account,num_accounts,total_txs,target_height,target_block_time_s,target_delta_s,processed_height,processed_block_time_s,processed_delta_s,avg_block_time_s")
+	_, err = fmt.Fprintln(
+		f,
+		"round,txs_per_account,num_accounts,total_txs,"+
+			"target_height,target_block_time_s,target_delta_s,"+
+			"processed_h1,processed_h1_time_s,processed_h1_delta_s,"+
+			"processed_h2,processed_h2_time_s,processed_h2_delta_s,"+
+			"processed_h3,processed_h3_time_s,processed_h3_delta_s,"+
+			"avg_block_time_s",
+	)
 	return err
 }
 
-func appendRoundCSV(path string, round, txPerAcc, numAcc int, totalTxs int64, targetH int64, bt, btDelta float64, processedH int64, btn, btnDelta float64, baseline float64) error {
+// UPDATED: append function writes h+1, h+2, h+3
+func appendRoundCSV(
+	path string,
+	round, txPerAcc, numAcc int,
+	totalTxs int64,
+	targetH int64,
+	targetTime, targetDelta float64,
+	processedH1 int64, processedT1, processedDelta1 float64,
+	processedH2 int64, processedT2, processedDelta2 float64,
+	processedH3 int64, processedT3, processedDelta3 float64,
+	baseline float64,
+) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
@@ -683,8 +703,13 @@ func appendRoundCSV(path string, round, txPerAcc, numAcc int, totalTxs int64, ta
 	defer f.Close()
 	_, err = fmt.Fprintf(
 		f,
-		"%d,%d,%d,%d,%d,%.3f,%.3f,%d,%.3f,%.3f,%.3f\n",
-		round, txPerAcc, numAcc, totalTxs, targetH, bt, btDelta, processedH, btn, btnDelta, baseline,
+		"%d,%d,%d,%d,%d,%.3f,%.3f,%d,%.3f,%.3f,%d,%.3f,%.3f,%d,%.3f,%.3f,%.3f\n",
+		round, txPerAcc, numAcc, totalTxs,
+		targetH, targetTime, targetDelta,
+		processedH1, processedT1, processedDelta1,
+		processedH2, processedT2, processedDelta2,
+		processedH3, processedT3, processedDelta3,
+		baseline,
 	)
 	return err
 }
@@ -1006,7 +1031,7 @@ func IBEBenchmark() {
 		}
 		fmt.Printf("[round %d] refuel complete ✔\n", r.rnum)
 
-		// 9) wait to target height and measure block time (target and next)
+		// 9) wait to target height and measure block time (target and nexts)
 		fmt.Printf("[round %d] waiting for target height %d…\n", r.rnum, targetH)
 		if _, err := waitUntilHeight(ctx, targetH); err != nil {
 			panic(err)
@@ -1020,12 +1045,11 @@ func IBEBenchmark() {
 		if _, err := waitUntilHeight(ctx, targetH+1); err != nil {
 			panic(err)
 		}
-		btn, err := blockTimeForHeight(ctx, targetH+1)
+		btn1, err := blockTimeForHeight(ctx, targetH+1)
 		if err != nil {
 			panic(err)
 		}
 
-		// (Optional) Also measure +2 as before — not persisted to CSV
 		fmt.Printf("[round %d] waiting for height %d…\n", r.rnum, targetH+2)
 		if _, err := waitUntilHeight(ctx, targetH+2); err != nil {
 			panic(err)
@@ -1035,14 +1059,27 @@ func IBEBenchmark() {
 			panic(err)
 		}
 
+		// NEW: measure +3 and persist it
+		fmt.Printf("[round %d] waiting for height %d…\n", r.rnum, targetH+3)
+		if _, err := waitUntilHeight(ctx, targetH+3); err != nil {
+			panic(err)
+		}
+		btn3, err := blockTimeForHeight(ctx, targetH+3)
+		if err != nil {
+			panic(err)
+		}
+
 		fmt.Printf("[round %d] target block %d time: %.3fs (baseline %.3fs, Δ=%.3fs)\n",
 			r.rnum, targetH, bt, baseline, bt-baseline)
 
 		fmt.Printf("[round %d] processed block %d time: %.3fs (baseline %.3fs, Δ=%.3fs)\n",
-			r.rnum, targetH+1, btn, baseline, btn-baseline)
+			r.rnum, targetH+1, btn1, baseline, btn1-baseline)
 
 		fmt.Printf("[round %d] processed block %d time: %.3fs (baseline %.3fs, Δ=%.3fs)\n",
 			r.rnum, targetH+2, btn2, baseline, btn2-baseline)
+
+		fmt.Printf("[round %d] processed block %d time: %.3fs (baseline %.3fs, Δ=%.3fs)\n",
+			r.rnum, targetH+3, btn3, baseline, btn3-baseline)
 
 		// ── persist a CSV row immediately for this round ──
 		totalTxs := int64(numAccounts) * int64(r.rnum)
@@ -1055,9 +1092,9 @@ func IBEBenchmark() {
 			targetH,
 			bt,
 			bt-baseline,
-			targetH+1,
-			btn,
-			btn-baseline,
+			targetH+1, btn1, btn1-baseline,
+			targetH+2, btn2, btn2-baseline,
+			targetH+3, btn3, btn3-baseline,
 			baseline,
 		); err != nil {
 			// Don't kill the run if CSV append fails; just log it.
