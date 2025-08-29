@@ -11,7 +11,7 @@ from pathlib import Path
 # ───────────────────────── CONFIG ─────────────────────────
 FAIRYRINGD = "fairyringd"
 CHAIN_ID = "fairyring_devnet"
-HOME_DIR = "./devnet_data/fairyring_devnet"
+HOME_DIR = "/home/grider644/go/src/github.com/FairBlock/fairyring/devnet_data/fairyring_devnet"
 KEYRING_BACKEND = "test"
 FROM = "fairy1m9l358xunhhwds0568za49mzhvuxx9uxdra8sq"
 TARGET_BLOCK_HEIGHT = "10000"
