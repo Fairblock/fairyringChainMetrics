@@ -31,7 +31,7 @@ const (
 	accountPrefix = "pepacc" // created accounts: pepacc0001..pepacc1000
 
 	// scale
-	numAccounts     = 1000
+	numAccounts     = 100
 	fundInitialEach = int64(50_000_000) // initial seeding per account
 	fundRoundEach   = int64(5_000_000_000)
 
@@ -45,7 +45,7 @@ const (
 	// ── multi-msg funding gas heuristics + batching size
 	baseGasFunding   = int64(300_000)
 	gasPerMsgFunding = int64(90_000)
-	fundBatchSize    = 200 // msgs per funding tx (adjust as needed)
+	fundBatchSize    = 100 // msgs per funding tx (adjust as needed)
 
 	// timings
 	pollInterval       = 500 * time.Millisecond
@@ -57,8 +57,8 @@ const (
 	metricsCSVPath   = outRoot + "/round_metrics.csv"
 	logEveryN        = 50
 	parAccounts      = 100
-	maxRounds        = 10         // set to any N ≥ 1
-	targetOffsetStep = int64(100) // round r → target = currentHeight + r*targetOffsetStep
+	maxRounds        = 10        // set to any N ≥ 1
+	targetOffsetStep = int64(20) // round r → target = currentHeight + r*targetOffsetStep
 )
 
 // Derive how many offline txs each account must pre-sign (1+2+…+maxRounds)
