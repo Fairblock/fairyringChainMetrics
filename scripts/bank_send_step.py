@@ -356,19 +356,34 @@ INTERRUPTED = False
 def write_results_to_csv(path: str):
     if not RESULTS:
         return
+
+    # Desired output order
+    fieldnames = [
+        "n_msgs",
+        "execution_height",
+        "avg_block_time",
+        "execution_block_time",
+        "execution_delta",
+        "gas_used",
+    ]
+
     p = Path(path)
     write_header = not p.exists()
     with p.open("a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=[
-            "exp_index","n_msgs","txhash","height","code",
-            "gas_used","gas_wanted","block_time_sec",
-            "pr_block_time_sec","baseline_avg_sec","delta_sec",
-            "pr_delta_sec","fee_amount","gas_limit","timestamp"
-        ])
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         if write_header:
             writer.writeheader()
+
         for row in RESULTS:
-            writer.writerow(row)
+            out_row = {
+                "n_msgs": row["n_msgs"],
+                "execution_height": row["height"],
+                "avg_block_time": row["baseline_avg_sec"],
+                "execution_block_time": row["pr_block_time_sec"],
+                "execution_delta": row["pr_delta_sec"],
+                "gas_used": row["gas_used"],
+            }
+            writer.writerow(out_row)
 
 def handle_sigint(sig, frame):
     global INTERRUPTED

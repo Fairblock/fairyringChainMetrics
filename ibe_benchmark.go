@@ -657,7 +657,32 @@ func pepSubmitEncryptedTx(ctx context.Context, fromName, data string, target int
 
 // ───────────────────────── CSV helpers ─────────────────────────
 
-// UPDATED: header now includes processed_h1 (h+1), processed_h2 (h+2), processed_h3 (h+3)
+// func ensureCSVHeader(path string) error {
+// 	// create dir
+// 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+// 		return err
+// 	}
+// 	// if file exists and non-empty, do nothing
+// 	if st, err := os.Stat(path); err == nil && st.Size() > 0 {
+// 		return nil
+// 	}
+// 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	defer f.Close()
+// 	_, err = fmt.Fprintln(
+// 		f,
+// 		"round,txs_per_account,num_accounts,total_txs,"+
+// 			"target_height,target_block_time_s,target_delta_s,"+
+// 			"processed_h1,processed_h1_time_s,processed_h1_delta_s,"+
+// 			"processed_h2,processed_h2_time_s,processed_h2_delta_s,"+
+// 			"processed_h3,processed_h3_time_s,processed_h3_delta_s,"+
+// 			"avg_block_time_s",
+// 	)
+// 	return err
+// }
+
 func ensureCSVHeader(path string) error {
 	// create dir
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -674,17 +699,12 @@ func ensureCSVHeader(path string) error {
 	defer f.Close()
 	_, err = fmt.Fprintln(
 		f,
-		"round,txs_per_account,num_accounts,total_txs,"+
-			"target_height,target_block_time_s,target_delta_s,"+
-			"processed_h1,processed_h1_time_s,processed_h1_delta_s,"+
-			"processed_h2,processed_h2_time_s,processed_h2_delta_s,"+
-			"processed_h3,processed_h3_time_s,processed_h3_delta_s,"+
-			"avg_block_time_s",
+		"total_enc_txs,target_height,processed_height,"+
+			"avg_block_time,processed_block_time,processed_time_delta",
 	)
 	return err
 }
 
-// UPDATED: append function writes h+1, h+2, h+3
 func appendRoundCSV(
 	path string,
 	round, txPerAcc, numAcc int,
@@ -703,16 +723,45 @@ func appendRoundCSV(
 	defer f.Close()
 	_, err = fmt.Fprintf(
 		f,
-		"%d,%d,%d,%d,%d,%.3f,%.3f,%d,%.3f,%.3f,%d,%.3f,%.3f,%d,%.3f,%.3f,%.3f\n",
-		round, txPerAcc, numAcc, totalTxs,
-		targetH, targetTime, targetDelta,
-		processedH1, processedT1, processedDelta1,
-		processedH2, processedT2, processedDelta2,
-		processedH3, processedT3, processedDelta3,
-		baseline,
+		"%d,%d,%d,%.3f,%.3f,%.3f\n",
+		totalTxs,        // total_enc_txs
+		targetH,         // target_height
+		processedH2,     // processed_height
+		baseline,        // avg_block_time
+		processedT3,     // processed_block_time
+		processedDelta3, // processed_time_delta
 	)
 	return err
 }
+
+// func appendRoundCSV(
+// 	path string,
+// 	round, txPerAcc, numAcc int,
+// 	totalTxs int64,
+// 	targetH int64,
+// 	targetTime, targetDelta float64,
+// 	processedH1 int64, processedT1, processedDelta1 float64,
+// 	processedH2 int64, processedT2, processedDelta2 float64,
+// 	processedH3 int64, processedT3, processedDelta3 float64,
+// 	baseline float64,
+// ) error {
+// 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	defer f.Close()
+// 	_, err = fmt.Fprintf(
+// 		f,
+// 		"%d,%d,%d,%d,%d,%.3f,%.3f,%d,%.3f,%.3f,%d,%.3f,%.3f,%d,%.3f,%.3f,%.3f\n",
+// 		round, txPerAcc, numAcc, totalTxs,
+// 		targetH, targetTime, targetDelta,
+// 		processedH1, processedT1, processedDelta1,
+// 		processedH2, processedT2, processedDelta2,
+// 		processedH3, processedT3, processedDelta3,
+// 		baseline,
+// 	)
+// 	return err
+// }
 
 // ───────────────────────── utils ─────────────────────────
 
