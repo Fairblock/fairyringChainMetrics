@@ -1,4 +1,4 @@
-module github.com/FairBlock/fairyChainMetrics
+module github.com/FairBlock/benchmark
 
 go 1.22.10
 

@@ -1,9 +1,9 @@
-# FairyringChainMetrics
+# ConfidentialComputingBenchmark
 
 Instructions for running benchmark tests against a local **Fairyring** devnet. This repository currently supports the following benchmark flows:
 
 1. **Bank transfer benchmark** (Cosmos SDK `bank send`) — `scripts/bank_send_step.py`
-2. **IBE transaction benchmark** — Go CLI (`fairyChainMetrics startFetchMetrics`)
+2. **IBE-MPC benchmark** — Go CLI (`benchmark`)
 
 > **Important:** The Fairyring devnet **must be restarted after each benchmark** to ensure clean, comparable results.
 
@@ -57,10 +57,13 @@ The benchmarks assume a locally running Fairyring devnet.
    ```
 
 > **Stop the devnet** with:
+>
 > ```bash
 > make devnet-down
 > ```
+>
 > You **must** restart the devnet **after finishing each benchmark**:
+>
 > ```bash
 > make devnet-down && make devnet-up
 > ```
@@ -149,7 +152,7 @@ Review and adjust top‑of‑file constants in `scripts/bank_send_step.py` as ne
 
 ## 5. Benchmark B — IBE Transactions
 
-**CLI:** `fairyChainMetrics`
+**CLI:** `benchmark`
 
 This benchmark submits **IBE transactions** and records associated metrics.
 
@@ -171,10 +174,10 @@ export PATH="$(go env GOPATH)/bin:$PATH"
 ### 5.2 Run
 
 ```bash
-fairyChainMetrics startFetchMetrics
+benchmark
 ```
 
-The command will use the `homeDir` value configured in `ibe_benchmark.go`. If your local branch adds flags (e.g., custom chain ID or RPC endpoint), consult `fairyChainMetrics --help`.
+The command will use the `homeDir` value configured in `ibe_benchmark.go`. If your local branch adds flags (e.g., custom chain ID or RPC endpoint), consult `benchmark --help`.
 
 ### 5.3 Outputs
 
@@ -195,7 +198,7 @@ The command will use the `homeDir` value configured in `ibe_benchmark.go`. If yo
 - **Devnet not producing blocks**  
   Re‑run `make devnet-up` in the `fairyring` repository; verify with `fairyringd status` or the RPC `status` endpoint. Confirm ports `26657/26656/1317` are not in use by other processes.
 
-- **CLI not found (`fairyChainMetrics`)**  
+- **CLI not found (`benchmark`)**  
   Ensure the Go install path is on `PATH` (see Section 5.1).
 
 - **Incorrect `HOME_DIR/homeDir`**  

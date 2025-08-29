@@ -1,3 +1,4 @@
 pep_out/
+data/
 *.csv
 !recorded_stats/
